@@ -40,6 +40,10 @@
 			"zone_name": "creds.id"
 		},
 		{
+			"pattern": "creds.id/vault/root",
+			"zone_name": "creds.id"
+		},
+		{
 			"pattern": "creds.id/vault/root/*",
 			"zone_name": "creds.id"
 		}

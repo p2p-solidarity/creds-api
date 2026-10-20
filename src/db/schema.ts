@@ -22,8 +22,13 @@ export const rootVaults = sqliteTable(
     version: integer("version", { mode: "number" }).notNull(),
     ciphertext: text("ciphertext").notNull(),
     createdAt: integer("created_at", { mode: "number" }).notNull(),
+    owner: text("owner"),
+    meta: text("meta"),
   },
-  (table) => [check("root_vaults_version_check", sql`${table.version} = 1`)],
+  (table) => [
+    check("root_vaults_version_check", sql`${table.version} = 1`),
+    index("root_vaults_owner_idx").on(table.owner),
+  ],
 );
 
 export const nip05Handles = sqliteTable(
