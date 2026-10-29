@@ -46,8 +46,17 @@
 		{
 			"pattern": "creds.id/vault/root/*",
 			"zone_name": "creds.id"
+		},
+		// Pro license bridge (airmeishi docs/ref/09).
+		{
+			"pattern": "creds.id/pro/*",
+			"zone_name": "creds.id"
 		}
 	],
+	"vars": {
+		"IOS_BUNDLE_ID": "kidneyweakx.airmeishi",
+		"ANDROID_PACKAGE": "gg.solidarity.app"
+	},
 	"d1_databases": [
 		{
 			// Binding name is what the shared repository code reads; the database

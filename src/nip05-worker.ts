@@ -2,6 +2,7 @@ import { OpenAPIHono } from "@hono/zod-openapi";
 import { cors } from "hono/cors";
 import { rateLimitMiddleware } from "./middleware/rate-limit";
 import { nip05Router } from "./routes/nip05";
+import { proRouter } from "./routes/pro";
 import { rootVaultRouter } from "./routes/rootVault";
 import { runNip05Cleanup } from "./schedules/index";
 import type { CloudflareBindings } from "./types/bindings";
@@ -30,6 +31,7 @@ app
   )
   .use("*", rateLimitMiddleware)
   .route("/", rootVaultRouter)
+  .route("/", proRouter)
   .route("/", nip05Router);
 
 export default {
