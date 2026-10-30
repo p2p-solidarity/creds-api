@@ -54,20 +54,29 @@ async function appStoreToken(env: CloudflareBindings, now: number): Promise<stri
   return `${unsigned}.${b64u(sig)}`;
 }
 
+const APP_STORE_HOSTS = ["api.storekit.itunes.apple.com", "api.storekit-sandbox.itunes.apple.com"] as const;
+
 export async function lookupAppStore(env: CloudflareBindings, transactionId: string, now: number): Promise<StoreResult> {
   if (!env.ASC_P8_KEY || !env.ASC_KEY_ID || !env.ASC_ISSUER_ID || !env.IOS_BUNDLE_ID) return { ok: false, error: "not_configured" };
   if (!/^[0-9]{1,32}$/u.test(transactionId)) return { ok: false, error: "not_found" };
-  let body: { data?: { lastTransactions?: { status?: number; signedTransactionInfo?: string }[] }[] };
+  let body: { data?: { lastTransactions?: { status?: number; signedTransactionInfo?: string }[] }[] } | null = null;
   try {
-    const res = await fetch(`https://api.storekit.itunes.apple.com/inApps/v1/subscriptions/${transactionId}`, {
-      headers: { Authorization: `Bearer ${await appStoreToken(env, now)}` },
-    });
-    if (res.status === 404) return { ok: false, error: "not_found" };
-    if (!res.ok) return { ok: false, error: "store_unreachable" };
-    body = await res.json();
+    const token = await appStoreToken(env, now);
+    // Apple's order: production first, sandbox on 404. TestFlight, sandbox
+    // testers and App Review all buy in sandbox, even with a production build.
+    for (const host of APP_STORE_HOSTS) {
+      const res = await fetch(`https://${host}/inApps/v1/subscriptions/${transactionId}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.status === 404) continue;
+      if (!res.ok) return { ok: false, error: "store_unreachable" };
+      body = await res.json();
+      break;
+    }
   } catch {
     return { ok: false, error: "store_unreachable" };
   }
+  if (body === null) return { ok: false, error: "not_found" };
   for (const group of body.data ?? []) {
     for (const t of group.lastTransactions ?? []) {
       // status 1 = active, 4 = billing grace period.
