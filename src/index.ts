@@ -20,7 +20,7 @@ const app = new OpenAPIHono<{ Bindings: CloudflareBindings }>().doc(openapi_docu
 app
   .use("*", cors({
     origin: "*",
-    allowHeaders: ["Content-Type", "Authorization"],
+    allowHeaders: ["Content-Type", "Authorization", "X-Creds-Signature"],
     allowMethods: ["POST", "GET", "OPTIONS", "PUT", "DELETE"],
     exposeHeaders: ["Content-Length"],
     maxAge: 600,

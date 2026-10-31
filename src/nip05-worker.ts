@@ -24,7 +24,7 @@ app
     "*",
     cors({
       origin: "*",
-      allowHeaders: ["Content-Type", "Authorization"],
+      allowHeaders: ["Content-Type", "Authorization", "X-Creds-Signature"],
       allowMethods: ["POST", "PUT", "PATCH", "GET", "OPTIONS", "DELETE"],
       maxAge: 600,
     }),
