@@ -5,8 +5,7 @@
  *                        payload { did, platform: 'ios'|'android', purchase, aud, iat }
  *                        → { license } (≤ 7 days, never past the store expiry)
  *   GET  /pro/issuers    → { issuers: [did] } — the key verifiers pin
- *   DELETE /pro/binding  { request: <compact JWS by the did> }
- *                        payload { did, aud: 'creds.id/pro/binding/delete', iat }
+ *   DELETE /pro/binding  X-Creds-Signature by the did (lib/signedRequest.ts)
  *                        → { deleted: n } — account deletion drops every
  *                        purchase ↔ did row of that did
  *
@@ -18,10 +17,10 @@ import { Hono } from "hono";
 import { verifyCompact } from "../../lib/nip05/jws";
 import { didKeyFromScalar, mintLicense } from "../../lib/pro/license";
 import { lookupAppStore, lookupPlay } from "../../lib/pro/stores";
+import { SIGNED_REQUEST_HEADER, verifySignedRequest } from "../../lib/signedRequest";
 import type { CloudflareBindings } from "../../types/bindings";
 
 const AUDIENCE = "creds.id/pro/license";
-const DELETE_AUDIENCE = "creds.id/pro/binding/delete";
 const REQUEST_WINDOW_SECONDS = 300;
 const REBIND_COOLDOWN_SECONDS = 30 * 86_400;
 
@@ -56,23 +55,14 @@ proRouter.get("/pro/issuers", (c) => {
  * never outlives 7 days.
  */
 proRouter.delete("/pro/binding", async (c) => {
-  let body: { request?: unknown };
-  try {
-    body = await c.req.json();
-  } catch {
-    return c.json({ error: "invalid_request" }, 400);
-  }
-  if (typeof body.request !== "string" || body.request.length > 4096) return c.json({ error: "invalid_request" }, 400);
-  const did = unsafeDid(body.request);
-  if (did === null) return c.json({ error: "invalid_request" }, 400);
-  const verified = verifyCompact(body.request, did);
-  if (!verified.ok) return c.json({ error: "invalid_signature" }, 401);
-  const p = verified.payload;
-  const now = Math.floor(Date.now() / 1000);
-  if (p["aud"] !== DELETE_AUDIENCE || typeof p["iat"] !== "number" || Math.abs(now - p["iat"]) > REQUEST_WINDOW_SECONDS) {
-    return c.json({ error: "stale_request" }, 401);
-  }
-  const deleted = await c.env.INBOX_DB.prepare("DELETE FROM pro_bindings WHERE did = ?").bind(did).run();
+  const signed = await verifySignedRequest(c.env.INBOX_DB, {
+    header: c.req.header(SIGNED_REQUEST_HEADER),
+    method: "DELETE",
+    path: "/pro/binding",
+    nowSeconds: Math.floor(Date.now() / 1000),
+  });
+  if (!signed.ok) return c.json({ error: signed.error }, signed.error === "missing" ? 400 : 401);
+  const deleted = await c.env.INBOX_DB.prepare("DELETE FROM pro_bindings WHERE did = ?").bind(signed.did).run();
   return c.json({ deleted: deleted.meta.changes ?? 0 });
 });
 

@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import type { D1Database } from "@cloudflare/workers-types";
 import type { CloudflareBindings } from "../../types/bindings";
+import { NONCE_TABLE_SQL, signRequest } from "../../testing/signRequest";
 import { rootVaultRouter } from "./index";
 
 class TestPreparedStatement {
@@ -56,8 +57,10 @@ beforeEach(() => {
       ciphertext TEXT NOT NULL,
       created_at INTEGER NOT NULL,
       owner TEXT,
-      meta TEXT
+      meta TEXT,
+      owner_did TEXT
     );
+    ${NONCE_TABLE_SQL}
   `);
   env = {
     INBOX_DB: new TestD1Database(sqlite) as unknown as D1Database,
@@ -154,8 +157,16 @@ const OTHER_SECRET = `${"T".repeat(42)}A`;
 const META = "M".repeat(60);
 const LOCATOR_2 = "Z".repeat(43);
 
+const DID_KEY = "51".repeat(32);
+const OTHER_DID_KEY = "52".repeat(32);
+
 function bearer(secret: string) {
   return { authorization: `Bearer ${secret}` };
+}
+
+/** Owner secret plus a fresh signed request for `method path` — what the app and web send. */
+function owned(secret: string, method: string, path: string, key = DID_KEY) {
+  return { ...bearer(secret), "x-creds-signature": signRequest(key, { m: method, p: path }) };
 }
 
 async function putVault(
@@ -163,10 +174,14 @@ async function putVault(
   body: unknown,
   headers: Record<string, string> = {},
 ) {
+  const signed =
+    headers.authorization !== undefined && headers["x-creds-signature"] === undefined
+      ? { "x-creds-signature": signRequest(DID_KEY, { m: "PUT", p: `/vault/root/${locator}` }) }
+      : {};
   return fetchRoute(
     new Request(`https://creds.id/vault/root/${locator}`, {
       method: "PUT",
-      headers: { "content-type": "application/json", ...headers },
+      headers: { "content-type": "application/json", ...headers, ...signed },
       body: JSON.stringify(body),
     }),
   );
@@ -253,15 +268,15 @@ describe("root vault owner index", () => {
       fetchRoute(
         new Request(`https://creds.id/vault/root/${LOCATOR}/owner`, {
           method: "PUT",
-          headers: { "content-type": "application/json", ...bearer(secret) },
+          headers: { "content-type": "application/json", ...owned(secret, "PUT", `/vault/root/${LOCATOR}/owner`) },
           body: JSON.stringify({ meta: META }),
         }),
       );
     expect((await claim(OWNER_SECRET)).status).toBe(200);
     expect((await claim(OWNER_SECRET)).status).toBe(200);
     expect((await claim(OTHER_SECRET)).status).toBe(404);
-    const owned = (await (await list(OWNER_SECRET)).json()) as { rows: unknown[] };
-    expect(owned.rows).toHaveLength(1);
+    const mine = (await (await list(OWNER_SECRET)).json()) as { rows: unknown[] };
+    expect(mine.rows).toHaveLength(1);
     const other = (await (await list(OTHER_SECRET)).json()) as { rows: unknown[] };
     expect(other.rows).toHaveLength(0);
   });
@@ -273,7 +288,7 @@ describe("root vault owner index", () => {
       fetchRoute(
         new Request(`https://creds.id/vault/root/${locator}`, {
           method: "DELETE",
-          headers: secret === undefined ? {} : bearer(secret),
+          headers: secret === undefined ? {} : owned(secret, "DELETE", `/vault/root/${locator}`),
         }),
       );
     expect((await del(LOCATOR, OWNER_SECRET)).status).toBe(404);
@@ -282,5 +297,38 @@ describe("root vault owner index", () => {
     expect((await del(LOCATOR_2, OWNER_SECRET)).status).toBe(204);
     expect((await fetchRoute(new Request(`https://creds.id/vault/root/${LOCATOR_2}`))).status).toBe(404);
     expect((await fetchRoute(new Request(`https://creds.id/vault/root/${LOCATOR}`))).status).toBe(200);
+  });
+
+  test("an owned write or delete needs the root did's signature for that exact request, once", async () => {
+    const path = `/vault/root/${LOCATOR}`;
+    // Owner secret alone no longer creates an owned row.
+    const unsigned = await fetchRoute(
+      new Request(`https://creds.id${path}`, {
+        method: "PUT",
+        headers: { "content-type": "application/json", ...bearer(OWNER_SECRET) },
+        body: JSON.stringify(RECORD),
+      }),
+    );
+    expect(unsigned.status).toBe(401);
+    expect((await putVault(LOCATOR, RECORD, bearer(OWNER_SECRET))).status).toBe(201);
+
+    const del = (headers: Record<string, string>) =>
+      fetchRoute(new Request(`https://creds.id${path}`, { method: "DELETE", headers }));
+    expect((await del(bearer(OWNER_SECRET))).status).toBe(401);
+    // Another identity, another record, another method: all refused.
+    expect((await del(owned(OWNER_SECRET, "DELETE", path, OTHER_DID_KEY))).status).toBe(404);
+    expect((await del(owned(OWNER_SECRET, "DELETE", `/vault/root/${LOCATOR_2}`))).status).toBe(401);
+    expect((await del(owned(OWNER_SECRET, "PUT", path))).status).toBe(401);
+    // A forged signature under the owner's did.
+    expect((await del({ ...bearer(OWNER_SECRET), "x-creds-signature": signRequest(OTHER_DID_KEY, { m: "DELETE", p: path }, DID_KEY) })).status).toBe(401);
+    // Stale.
+    const stale = signRequest(DID_KEY, { m: "DELETE", p: path, iat: Math.floor(Date.now() / 1000) - 301 });
+    expect((await del({ ...bearer(OWNER_SECRET), "x-creds-signature": stale })).status).toBe(401);
+
+    const header = signRequest(DID_KEY, { m: "DELETE", p: path });
+    expect((await del({ ...bearer(OWNER_SECRET), "x-creds-signature": header })).status).toBe(204);
+    // Replaying the same signed request fails even against a recreated row.
+    expect((await putVault(LOCATOR, RECORD, bearer(OWNER_SECRET))).status).toBe(201);
+    expect((await del({ ...bearer(OWNER_SECRET), "x-creds-signature": header })).status).toBe(401);
   });
 });

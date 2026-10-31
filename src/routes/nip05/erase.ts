@@ -4,6 +4,7 @@ import type { CloudflareBindings } from "../../types/bindings";
 import { verifyNip98Authorization } from "../../lib/nip05/auth";
 import { purgeDirectoryCaches } from "../../lib/nip05/cache";
 import { eraseHandlesForPubkey } from "../../lib/nip05/repository";
+import { consumeNonce } from "../../lib/signedRequest";
 import { EraseResponseSchema, ErrorSchema } from "./schemas";
 
 export const eraseRoute = createRoute({
@@ -39,6 +40,11 @@ export const eraseHandler = async (c: Context<{ Bindings: CloudflareBindings }>)
   }
 
   try {
+    // NIP-98 events are single-use here too (the audit table that dedupes
+    // release events is exactly what erase deletes).
+    if (!(await consumeNonce(c.env.INBOX_DB, `nip98:${auth.event.id}`, nowSeconds + 120))) {
+      return c.json({ error: "invalid_auth", detail: "replay" }, 401);
+    }
     const result = await eraseHandlesForPubkey(c.env.INBOX_DB, {
       pubkey: auth.event.pubkey,
       nowSeconds,

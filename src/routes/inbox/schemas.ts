@@ -57,6 +57,7 @@ export const AckResponseSchema = z.object({
 export const DeleteAllRequestSchema = z.object({
   pubkey: z.string().min(1).max(200),
   ts: z.number().int(),
+  nonce: z.string().regex(/^[A-Za-z0-9_-]{16,64}$/),
   sig: z.string().min(1).max(500),
 });
 

@@ -19,12 +19,12 @@ creds is built to keep working if this server disappears: identities are keys on
 
 ### Account deletion
 
-The app's Settings → Delete account calls, each signed by the key it deletes for:
+Every delete must be signed by the account's own key — never a bearer secret or an email alone. Requests signed by the root did:key carry `X-Creds-Signature`: a compact ES256 JWS (`kid = <did>#0`) over `{aud: "creds.id", m: <method>, p: <path>, iat, jti}`, valid ±5 minutes and once (`jti` is stored in `signed_request_nonces`) — `src/lib/signedRequest.ts`.
 
-- `DELETE /vault/root/:locator` (owner secret) for every row in the owner index.
-- `DELETE /id/account` (NIP-98): every name the pubkey ever held becomes a released tombstone with pubkey `erased`, and its audit rows are dropped. The rows stay so nobody else can ever register the name and impersonate the old page (G3); with the pubkey gone, the name is no longer linked to the person and can't be reclaimed, not even with the old key.
-- `DELETE /pro/binding` (ES256 JWS by the did, `aud: creds.id/pro/binding/delete`): the purchase ↔ did rows are deleted outright. The store subscription itself is cancelled in the App Store / Play, not here.
-- `POST /inbox/delete` (Ed25519 over `creds-inbox-delete:<pubkey>:<ts>`, 5-minute window): only devices that still hold the retired Shoutouts key have anything here, and rows expire after 24h anyway.
+- `PUT /vault/root/:locator` (owned) and `PUT …/owner` need the owner secret **and** a signed request; the row records the signer as `owner_did`. `DELETE /vault/root/:locator` needs both too, from that same did (rows written before 2026-10-31 have no `owner_did` and fall back to the owner secret plus any valid signature).
+- `DELETE /id/account` (NIP-98 by the Nostr key, event id single-use): every name the pubkey ever held becomes a released tombstone with pubkey `erased`, and its audit rows are dropped. The rows stay so nobody else can ever register the name and impersonate the old page (G3); with the pubkey gone, the name is no longer linked to the person and can't be reclaimed, not even with the old key.
+- `DELETE /pro/binding` (signed by the did): the purchase ↔ did rows are deleted outright. The store subscription itself is cancelled in the App Store / Play, not here.
+- `POST /inbox/delete` (Ed25519 over `creds-inbox-delete:<pubkey>:<ts>:<nonce>`, 5 minutes, single-use nonce): only devices that still hold the retired Shoutouts key have anything here, and rows expire after 24h anyway.
 
 The zkTLS notary for social-account verification lives in the app monorepo (`apps/notary`), not here.
 

@@ -1,6 +1,7 @@
 import { sha256 } from "@noble/hashes/sha2.js";
 import { base64urlnopad } from "@scure/base";
 import { Hono, type Context } from "hono";
+import { SIGNED_REQUEST_HEADER, verifySignedRequest } from "../../lib/signedRequest";
 import type { CloudflareBindings } from "../../types/bindings";
 
 const LOCATOR_PATTERN = /^[A-Za-z0-9_-]{43}$/u;
@@ -18,6 +19,7 @@ interface RootVaultRow {
   readonly ciphertext: string;
   readonly owner: string | null;
   readonly meta: string | null;
+  readonly owner_did: string | null;
 }
 
 interface RootVaultRecord {
@@ -126,6 +128,21 @@ function unauthorized(c: RootVaultContext) {
   return c.json({ error: "unauthorized" }, 401, noStoreHeaders());
 }
 
+/**
+ * The root did:key that signed THIS request (method + path, single use). Owned
+ * writes record it as `owner_did`; deletes must come from it. The owner secret
+ * alone is a bearer — it lists and renames, but can't decide who may delete.
+ */
+async function signer(c: RootVaultContext, path: string): Promise<string | null> {
+  const signed = await verifySignedRequest(c.env.INBOX_DB, {
+    header: c.req.header(SIGNED_REQUEST_HEADER),
+    method: c.req.method,
+    path,
+    nowSeconds: Math.floor(Date.now() / 1_000),
+  });
+  return signed.ok ? signed.did : null;
+}
+
 function notFound(c: RootVaultContext) {
   return c.json({ error: "vault_not_found" }, 404, noStoreHeaders());
 }
@@ -210,6 +227,8 @@ export const rootVaultRouter = new Hono<{ Bindings: CloudflareBindings }>()
     if (owner === undefined && body.meta !== undefined) {
       return c.json({ error: "invalid_record" }, 400, noStoreHeaders());
     }
+    const ownerDid = owner === undefined ? null : await signer(c, `/vault/root/${locator}`);
+    if (owner !== undefined && ownerDid === null) return unauthorized(c);
     const meta = body.meta ?? null;
     const record = { v: body.v, ciphertext: body.ciphertext };
 
@@ -226,10 +245,10 @@ export const rootVaultRouter = new Hono<{ Bindings: CloudflareBindings }>()
 
     const createdAt = Math.floor(Date.now() / 1_000);
     const insert = await c.env.INBOX_DB.prepare(
-      `INSERT OR IGNORE INTO root_vaults (locator, version, ciphertext, created_at, owner, meta)
-       VALUES (?, ?, ?, ?, ?, ?)`,
+      `INSERT OR IGNORE INTO root_vaults (locator, version, ciphertext, created_at, owner, meta, owner_did)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
     )
-      .bind(locator, body.v, body.ciphertext, createdAt, owner ?? null, meta)
+      .bind(locator, body.v, body.ciphertext, createdAt, owner ?? null, meta, ownerDid)
       .run();
 
     if ((insert.meta.changes ?? 0) > 0) {
@@ -237,7 +256,7 @@ export const rootVaultRouter = new Hono<{ Bindings: CloudflareBindings }>()
     }
 
     const existing = await c.env.INBOX_DB.prepare(
-      "SELECT version, ciphertext, owner, meta FROM root_vaults WHERE locator = ?",
+      "SELECT version, ciphertext, owner, meta, owner_did FROM root_vaults WHERE locator = ?",
     )
       .bind(locator)
       .first<RootVaultRow>();
@@ -245,7 +264,8 @@ export const rootVaultRouter = new Hono<{ Bindings: CloudflareBindings }>()
       existing?.version === body.v &&
       existing.ciphertext === body.ciphertext &&
       existing.owner === (owner ?? null) &&
-      existing.meta === meta
+      existing.meta === meta &&
+      existing.owner_did === ownerDid
     ) {
       return c.json(record, 200, noStoreHeaders());
     }
@@ -288,20 +308,23 @@ export const rootVaultRouter = new Hono<{ Bindings: CloudflareBindings }>()
   /**
    * Adopt a row written before the owner index existed. Only an unowned row
    * (or one this owner already holds) can be claimed, and every new row is
-   * created owned, so this can never take over a current row.
+   * created owned, so this can never take over a current row. Claiming also
+   * binds the row to the signing did when it has none yet.
    */
   .put("/vault/root/:locator/owner", async (c) => {
     const locator = c.req.param("locator");
     if (!LOCATOR_PATTERN.test(locator)) return notFound(c);
     const owner = ownerHash(c);
     if (typeof owner !== "string") return unauthorized(c);
+    const did = await signer(c, `/vault/root/${locator}/owner`);
+    if (did === null) return unauthorized(c);
     const body = await readMetaBody(c);
     if (!body.ok) return body.response;
     const claimed = await c.env.INBOX_DB.prepare(
-      `UPDATE root_vaults SET owner = ?, meta = ?
-       WHERE locator = ? AND (owner IS NULL OR owner = ?)`,
+      `UPDATE root_vaults SET owner = ?, meta = ?, owner_did = ?
+       WHERE locator = ? AND (owner IS NULL OR owner = ?) AND (owner_did IS NULL OR owner_did = ?)`,
     )
-      .bind(owner, body.meta, locator, owner)
+      .bind(owner, body.meta, did, locator, owner, did)
       .run();
     return (claimed.meta.changes ?? 0) > 0
       ? c.json({ ok: true }, 200, noStoreHeaders())
@@ -312,10 +335,13 @@ export const rootVaultRouter = new Hono<{ Bindings: CloudflareBindings }>()
     if (!LOCATOR_PATTERN.test(locator)) return notFound(c);
     const owner = ownerHash(c);
     if (typeof owner !== "string") return unauthorized(c);
+    const did = await signer(c, `/vault/root/${locator}`);
+    if (did === null) return unauthorized(c);
+    // A row from before owner_did existed has only its owner secret to go on.
     const deleted = await c.env.INBOX_DB.prepare(
-      "DELETE FROM root_vaults WHERE locator = ? AND owner = ?",
+      "DELETE FROM root_vaults WHERE locator = ? AND owner = ? AND (owner_did = ? OR owner_did IS NULL)",
     )
-      .bind(locator, owner)
+      .bind(locator, owner, did)
       .run();
     return (deleted.meta.changes ?? 0) > 0
       ? c.body(null, 204, noStoreHeaders())

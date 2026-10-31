@@ -6,6 +6,7 @@ import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 import type { D1Database } from "@cloudflare/workers-types";
 import { canonicalizeNip98Url } from "../../lib/nip05/auth";
 import type { CloudflareBindings } from "../../types/bindings";
+import { NONCE_TABLE_SQL } from "../../testing/signRequest";
 import { nip05Router } from "./index";
 
 class TestPreparedStatement {
@@ -85,6 +86,7 @@ beforeEach(async () => {
     new URL("../../../drizzle/0001_nip05.sql", import.meta.url),
   ).text();
   sqlite.exec(migration);
+  sqlite.exec(NONCE_TABLE_SQL);
 
   currentTime = START_TIME;
   originalDateNow = Date.now;

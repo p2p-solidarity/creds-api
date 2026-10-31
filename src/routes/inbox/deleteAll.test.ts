@@ -3,6 +3,7 @@ import { Database } from "bun:sqlite";
 import { ed25519 } from "@noble/curves/ed25519.js";
 import type { CloudflareBindings } from "../../types/bindings";
 import { bytesToBase64 } from "../../lib/inbox/crypto";
+import { NONCE_TABLE_SQL } from "../../testing/signRequest";
 import { deleteAllPayload } from "./deleteAll";
 import { inboxRouter } from "./index";
 
@@ -15,6 +16,7 @@ let env: CloudflareBindings;
 beforeEach(async () => {
   sqlite = new Database(":memory:");
   sqlite.exec(await Bun.file(new URL("../../../drizzle/0000_inbox.sql", import.meta.url)).text());
+  sqlite.exec(NONCE_TABLE_SQL);
   const db = {
     prepare: (sql: string) => ({
       bind: (...bindings: unknown[]) => ({
@@ -39,23 +41,26 @@ const send = (body: unknown) =>
     env,
   );
 const now = () => Math.floor(Date.now() / 1000);
+const NONCE = "nonce-0123456789abcdef";
 const sign = (payload: Uint8Array) => bytesToBase64(ed25519.sign(payload, SECRET));
 
 describe("POST /inbox/delete", () => {
-  test("deletes every message of the signing key and nothing else", async () => {
+  test("deletes every message of the signing key and nothing else, once per nonce", async () => {
     const ts = now();
-    const response = await send({ pubkey: PUBKEY, ts, sig: sign(deleteAllPayload(PUBKEY, ts)) });
+    const request = { pubkey: PUBKEY, ts, nonce: NONCE, sig: sign(deleteAllPayload(PUBKEY, ts, NONCE)) };
+    const response = await send(request);
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ deleted: 2 });
     expect(sqlite.query("SELECT id FROM inbox").all()).toEqual([{ id: "c" }]);
+    expect((await send(request)).status).toBe(401);
   });
 
   test("refuses the static sync signature and stale requests", async () => {
     const ts = now();
     const syncSig = sign(new TextEncoder().encode(PUBKEY));
-    expect((await send({ pubkey: PUBKEY, ts, sig: syncSig })).status).toBe(401);
+    expect((await send({ pubkey: PUBKEY, ts, nonce: NONCE, sig: syncSig })).status).toBe(401);
     const old = ts - 301;
-    expect((await send({ pubkey: PUBKEY, ts: old, sig: sign(deleteAllPayload(PUBKEY, old)) })).status).toBe(401);
+    expect((await send({ pubkey: PUBKEY, ts: old, nonce: NONCE, sig: sign(deleteAllPayload(PUBKEY, old, NONCE)) })).status).toBe(401);
     expect(sqlite.query("SELECT COUNT(*) AS n FROM inbox").get()).toEqual({ n: 3 });
   });
 });

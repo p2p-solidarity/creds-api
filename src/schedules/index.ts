@@ -1,5 +1,6 @@
 import { createInboxDb, purgeExpiredMessages } from "../lib/inbox/repository";
 import { purgeExpiredNip05Data } from "../lib/nip05/repository";
+import { purgeExpiredNonces } from "../lib/signedRequest";
 import type { CloudflareBindings } from "../types/bindings";
 
 export async function runInboxCleanup(env: CloudflareBindings) {
@@ -7,6 +8,7 @@ export async function runInboxCleanup(env: CloudflareBindings) {
   const cutoffSeconds = Math.floor(Date.now() / 1000) - 60 * 60 * 24;
   const removed = await purgeExpiredMessages(db, cutoffSeconds);
   console.log(`🧹 Purged ${removed} expired inbox entries`);
+  await purgeExpiredNonces(env.INBOX_DB, Math.floor(Date.now() / 1000));
 }
 
 // Handle rows are permanent tombstones (design G3) and are never purged —
@@ -17,4 +19,5 @@ export async function runNip05Cleanup(env: CloudflareBindings) {
     Math.floor(Date.now() / 1000),
   );
   console.log(`🧹 Purged ${removed.audits} expired NIP-05 audit entries`);
+  await purgeExpiredNonces(env.INBOX_DB, Math.floor(Date.now() / 1000));
 }
