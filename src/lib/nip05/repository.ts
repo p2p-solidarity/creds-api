@@ -490,6 +490,51 @@ export async function purgeExpiredNip05Data(
   return { audits: getChangeCount(result) };
 }
 
+/**
+ * Stand-in pubkey for an erased holder. Not 64 hex chars, so no NIP-98
+ * signer can ever match it: the names stay tombstoned (G3) for everyone,
+ * the original holder included.
+ */
+export const ERASED_PUBKEY = "erased";
+
+/**
+ * Account deletion. Every row this pubkey ever held — active, redirected or
+ * released — becomes a released tombstone whose pubkey is `ERASED_PUBKEY`,
+ * and the signed audit trail for the pubkey is dropped.
+ *
+ * The rows themselves are kept on purpose: deleting one would free the name
+ * for a stranger to print as `name@creds.id` (the impersonation G3 exists to
+ * prevent). Dropping the pubkey is what removes the name↔key link; the cost
+ * is that the name can never be reclaimed, even with the old key. A replay of
+ * the same NIP-98 event inside its 60 s window finds nothing left to change.
+ */
+export async function eraseHandlesForPubkey(
+  db: D1Database,
+  input: { pubkey: string; nowSeconds: number },
+): Promise<{ erased: string[] }> {
+  const rows = await db
+    .prepare("SELECT name FROM nip05_handles WHERE pubkey = ?")
+    .bind(input.pubkey)
+    .all<{ name: string }>();
+  await db.batch([
+    db
+      .prepare(
+        `UPDATE nip05_handles
+         SET pubkey = ?,
+             status = 'released',
+             relays = '[]',
+             updated_at = ?,
+             released_at = COALESCE(released_at, ?),
+             redirect_to = NULL,
+             redirect_until = NULL
+         WHERE pubkey = ?`,
+      )
+      .bind(ERASED_PUBKEY, input.nowSeconds, input.nowSeconds, input.pubkey),
+    db.prepare("DELETE FROM nip05_audit WHERE pubkey = ?").bind(input.pubkey),
+  ]);
+  return { erased: (rows.results ?? []).map((row) => row.name) };
+}
+
 async function executeRegisterBatch(
   db: D1Database,
   input: RegisterHandleInput,

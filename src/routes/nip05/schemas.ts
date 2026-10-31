@@ -37,6 +37,10 @@ export const ReleaseResponseSchema = z.object({
   released: z.string().nullable(),
 });
 
+export const EraseResponseSchema = z.object({
+  erased: z.array(z.string()),
+});
+
 export const HistoryQuerySchema = z.object({
   name: z.string().optional().describe("NIP-05 name to inspect"),
 });

@@ -23,6 +23,10 @@ class TestPreparedStatement {
     return (this.database.query(this.sql).get(...this.bindings) as T | null) ?? null;
   }
 
+  async all<T>() {
+    return { results: this.database.query(this.sql).all(...this.bindings) as T[] };
+  }
+
   run() {
     const result = this.database.query(this.sql).run(...this.bindings);
     return {
@@ -115,7 +119,12 @@ async function flushPendingWork() {
   await Promise.all(pendingWork.splice(0));
 }
 
-function authorization(method: string, url: string, body?: string): string {
+function authorization(
+  method: string,
+  url: string,
+  body?: string,
+  secret: Uint8Array = SECRET_KEY,
+): string {
   const tags = [
     ["u", canonicalizeNip98Url(url)],
     ["method", method],
@@ -126,7 +135,7 @@ function authorization(method: string, url: string, body?: string): string {
 
   const event = {
     id: "",
-    pubkey: PUBKEY,
+    pubkey: bytesToHex(schnorr.getPublicKey(secret)),
     content: "",
     kind: 27_235,
     created_at: currentTime,
@@ -148,7 +157,7 @@ function authorization(method: string, url: string, body?: string): string {
     ),
   );
   event.sig = bytesToHex(
-    schnorr.sign(hexToBytes(event.id), SECRET_KEY, new Uint8Array(32)),
+    schnorr.sign(hexToBytes(event.id), secret, new Uint8Array(32)),
   );
   return `Nostr ${btoa(JSON.stringify(event))}`;
 }
@@ -331,5 +340,61 @@ describe("NIP-05 endpoints", () => {
     // critically, no manual-review path to escalate into.
     expect(response.status).toBe(404);
     expect(await response.json()).toEqual({ error: "name_not_found" });
+  });
+
+  test("account erase unlinks every name of the pubkey but keeps them reserved", async () => {
+    const registerUrl = "https://creds.id/id/register";
+    const register = async (name: string, secret = SECRET_KEY): Promise<Response> => {
+      const body = JSON.stringify({ name, consent: true });
+      return fetchRoute(
+        new Request(registerUrl, {
+          method: "POST",
+          headers: {
+            authorization: authorization("POST", registerUrl, body, secret),
+            "content-type": "application/json",
+          },
+          body,
+        }),
+      );
+    };
+    expect((await register("alice1")).status).toBe(200);
+    currentTime += 1;
+    expect((await register("bravo1")).status).toBe(200);
+
+    const eraseUrl = "https://creds.id/id/account";
+    // A NIP-98 event for another URL (the plain release) must not erase.
+    const wrongUrl = await fetchRoute(
+      new Request(eraseUrl, {
+        method: "DELETE",
+        headers: { authorization: authorization("DELETE", "https://creds.id/id") },
+      }),
+    );
+    expect(wrongUrl.status).toBe(401);
+
+    currentTime += 1;
+    const erased = await fetchRoute(
+      new Request(eraseUrl, {
+        method: "DELETE",
+        headers: { authorization: authorization("DELETE", eraseUrl) },
+      }),
+    );
+    expect(erased.status).toBe(200);
+    expect(((await erased.json()) as { erased: string[] }).erased.sort()).toEqual(["alice1", "bravo1"]);
+
+    // No row and no audit entry still carries the pubkey.
+    expect(sqlite.query("SELECT COUNT(*) AS n FROM nip05_handles WHERE pubkey = ?").get(PUBKEY)).toEqual({ n: 0 });
+    expect(sqlite.query("SELECT COUNT(*) AS n FROM nip05_audit WHERE pubkey = ?").get(PUBKEY)).toEqual({ n: 0 });
+    expect(sqlite.query("SELECT DISTINCT status FROM nip05_handles").all()).toEqual([{ status: "released" }]);
+
+    const resolved = await fetchRoute(new Request("https://creds.id/.well-known/nostr.json?name=bravo1"));
+    expect(await resolved.json()).toEqual({ names: {} });
+    const availability = await fetchRoute(new Request("https://creds.id/id/availability?name=bravo1"));
+    expect(await availability.json()).toEqual({ name: "bravo1", available: false, reason: "tombstoned" });
+
+    // Neither a stranger nor the old key can take the name back.
+    currentTime += 1;
+    const stranger = Uint8Array.from({ length: 32 }, (_, index) => (index === 31 ? 2 : 0));
+    expect((await register("bravo1", stranger)).status).toBe(409);
+    expect((await register("bravo1")).status).toBe(409);
   });
 });

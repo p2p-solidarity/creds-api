@@ -5,6 +5,10 @@
  *                        payload { did, platform: 'ios'|'android', purchase, aud, iat }
  *                        → { license } (≤ 7 days, never past the store expiry)
  *   GET  /pro/issuers    → { issuers: [did] } — the key verifiers pin
+ *   DELETE /pro/binding  { request: <compact JWS by the did> }
+ *                        payload { did, aud: 'creds.id/pro/binding/delete', iat }
+ *                        → { deleted: n } — account deletion drops every
+ *                        purchase ↔ did row of that did
  *
  * The purchase is looked up at the store, never believed from the app. One
  * purchase is bound to one did; rebinding to another did is allowed once per
@@ -17,6 +21,7 @@ import { lookupAppStore, lookupPlay } from "../../lib/pro/stores";
 import type { CloudflareBindings } from "../../types/bindings";
 
 const AUDIENCE = "creds.id/pro/license";
+const DELETE_AUDIENCE = "creds.id/pro/binding/delete";
 const REQUEST_WINDOW_SECONDS = 300;
 const REBIND_COOLDOWN_SECONDS = 30 * 86_400;
 
@@ -41,6 +46,34 @@ export const proRouter = new Hono<{ Bindings: CloudflareBindings }>();
 proRouter.get("/pro/issuers", (c) => {
   if (!c.env.LICENSE_SIGNING_KEY) return c.json({ issuers: [] });
   return c.json({ issuers: [didKeyFromScalar(c.env.LICENSE_SIGNING_KEY)] });
+});
+
+/**
+ * The row is deleted outright, not unlinked: after account deletion nothing
+ * here should still tie a store purchase to that identity. The price is that
+ * the 30-day rebind cooldown restarts from zero for that purchase — sharing it
+ * that way still costs a signed request from every holder, and a license
+ * never outlives 7 days.
+ */
+proRouter.delete("/pro/binding", async (c) => {
+  let body: { request?: unknown };
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: "invalid_request" }, 400);
+  }
+  if (typeof body.request !== "string" || body.request.length > 4096) return c.json({ error: "invalid_request" }, 400);
+  const did = unsafeDid(body.request);
+  if (did === null) return c.json({ error: "invalid_request" }, 400);
+  const verified = verifyCompact(body.request, did);
+  if (!verified.ok) return c.json({ error: "invalid_signature" }, 401);
+  const p = verified.payload;
+  const now = Math.floor(Date.now() / 1000);
+  if (p["aud"] !== DELETE_AUDIENCE || typeof p["iat"] !== "number" || Math.abs(now - p["iat"]) > REQUEST_WINDOW_SECONDS) {
+    return c.json({ error: "stale_request" }, 401);
+  }
+  const deleted = await c.env.INBOX_DB.prepare("DELETE FROM pro_bindings WHERE did = ?").bind(did).run();
+  return c.json({ deleted: deleted.meta.changes ?? 0 });
 });
 
 proRouter.post("/pro/license", async (c) => {
