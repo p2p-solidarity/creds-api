@@ -3,6 +3,8 @@ import { Database } from "bun:sqlite";
 import type { D1Database } from "@cloudflare/workers-types";
 import type { CloudflareBindings } from "../../types/bindings";
 import { NONCE_TABLE_SQL, signRequest } from "../../testing/signRequest";
+import { sha256 } from "@noble/hashes/sha2.js";
+import { base64urlnopad } from "@scure/base";
 import { rootVaultRouter } from "./index";
 
 class TestPreparedStatement {
@@ -156,6 +158,9 @@ const OWNER_SECRET = `${"S".repeat(42)}A`;
 const OTHER_SECRET = `${"T".repeat(42)}A`;
 const META = "M".repeat(60);
 const LOCATOR_2 = "Z".repeat(43);
+/** A passkey credential ID and the locator the app derives from it (shared `rootVaultLocator`). */
+const CREDENTIAL_ID = base64urlnopad.encode(new Uint8Array(32).fill(7));
+const CLAIMABLE = base64urlnopad.encode(sha256(base64urlnopad.decode(CREDENTIAL_ID)));
 
 const DID_KEY = "51".repeat(32);
 const OTHER_DID_KEY = "52".repeat(32);
@@ -263,13 +268,13 @@ describe("root vault owner index", () => {
   });
 
   test("claims a legacy unowned row once, never someone else's", async () => {
-    await putVault(LOCATOR, RECORD);
-    const claim = (secret: string) =>
+    await putVault(CLAIMABLE, RECORD);
+    const claim = (secret: string, body: Record<string, unknown> = { meta: META, credentialId: CREDENTIAL_ID }) =>
       fetchRoute(
-        new Request(`https://creds.id/vault/root/${LOCATOR}/owner`, {
+        new Request(`https://creds.id/vault/root/${CLAIMABLE}/owner`, {
           method: "PUT",
-          headers: { "content-type": "application/json", ...owned(secret, "PUT", `/vault/root/${LOCATOR}/owner`) },
-          body: JSON.stringify({ meta: META }),
+          headers: { "content-type": "application/json", ...owned(secret, "PUT", `/vault/root/${CLAIMABLE}/owner`) },
+          body: JSON.stringify(body),
         }),
       );
     expect((await claim(OWNER_SECRET)).status).toBe(200);
@@ -279,6 +284,23 @@ describe("root vault owner index", () => {
     expect(mine.rows).toHaveLength(1);
     const other = (await (await list(OTHER_SECRET)).json()) as { rows: unknown[] };
     expect(other.rows).toHaveLength(0);
+  });
+
+  test("knowing only the locator cannot claim a legacy row", async () => {
+    await putVault(CLAIMABLE, RECORD);
+    const claim = (body: Record<string, unknown>) =>
+      fetchRoute(
+        new Request(`https://creds.id/vault/root/${CLAIMABLE}/owner`, {
+          method: "PUT",
+          headers: { "content-type": "application/json", ...owned(OTHER_SECRET, "PUT", `/vault/root/${CLAIMABLE}/owner`) },
+          body: JSON.stringify(body),
+        }),
+      );
+    expect((await claim({ meta: META })).status).toBe(400);
+    expect((await claim({ meta: META, credentialId: CLAIMABLE })).status).toBe(400);
+    expect((await claim({ meta: META, credentialId: base64urlnopad.encode(new Uint8Array(32).fill(8)) })).status).toBe(400);
+    const row = sqlite.query("SELECT owner FROM root_vaults").get() as { owner: string | null };
+    expect(row.owner).toBeNull();
   });
 
   test("deletes only for the owner; an unowned row cannot be deleted", async () => {

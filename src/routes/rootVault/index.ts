@@ -1,6 +1,7 @@
 import { sha256 } from "@noble/hashes/sha2.js";
 import { base64urlnopad } from "@scure/base";
 import { Hono, type Context } from "hono";
+import { readLimitedBody } from "../../lib/readLimitedBody";
 import { SIGNED_REQUEST_HEADER, verifySignedRequest } from "../../lib/signedRequest";
 import type { CloudflareBindings } from "../../types/bindings";
 
@@ -42,32 +43,13 @@ async function readLimitedJson(
   request: Request,
   maxBytes: number,
 ): Promise<LimitedJson> {
-  const reader = request.body?.getReader();
-  if (reader === undefined) return { ok: false, tooLarge: false };
-  const chunks: Uint8Array[] = [];
-  let total = 0;
+  if (request.body === null) return { ok: false, tooLarge: false };
+  const read = await readLimitedBody(request, maxBytes);
+  if (!read.ok) return read;
   try {
-    while (true) {
-      const next = await reader.read();
-      if (next.done) break;
-      total += next.value.byteLength;
-      if (total > maxBytes) {
-        await reader.cancel();
-        return { ok: false, tooLarge: true };
-      }
-      chunks.push(next.value);
-    }
-    const bytes = new Uint8Array(total);
-    let offset = 0;
-    for (const chunk of chunks) {
-      bytes.set(chunk, offset);
-      offset += chunk.byteLength;
-    }
-    return { ok: true, value: JSON.parse(new TextDecoder().decode(bytes)) };
+    return { ok: true, value: JSON.parse(new TextDecoder().decode(read.bytes)) };
   } catch {
     return { ok: false, tooLarge: false };
-  } finally {
-    reader.releaseLock();
   }
 }
 
@@ -147,8 +129,15 @@ function notFound(c: RootVaultContext) {
   return c.json({ error: "vault_not_found" }, 404, noStoreHeaders());
 }
 
+/**
+ * `{ meta }` for a rename; a claim also carries `credentialId` (base64url),
+ * which must hash to the locator. The credential ID never reaches the service
+ * any other way, so a locator seen in a URL or log can't claim a legacy row
+ * (and then delete it) — only a device holding the passkey can.
+ */
 async function readMetaBody(
   c: RootVaultContext,
+  locatorProof?: string,
 ): Promise<{ ok: true; meta: string } | { ok: false; response: Response }> {
   const decoded = await readLimitedJson(c.req.raw, MAX_REQUEST_BYTES);
   if (!decoded.ok) {
@@ -165,8 +154,9 @@ async function readMetaBody(
   if (
     typeof body !== "object" ||
     body === null ||
-    Object.keys(body).length !== 1 ||
-    !isMeta(body.meta)
+    Object.keys(body).length !== (locatorProof === undefined ? 1 : 2) ||
+    !isMeta(body.meta) ||
+    (locatorProof !== undefined && !provesLocator(body.credentialId, locatorProof))
   ) {
     return {
       ok: false,
@@ -174,6 +164,18 @@ async function readMetaBody(
     };
   }
   return { ok: true, meta: body.meta };
+}
+
+/** Same derivation as shared `rootVaultLocator`: base64url(sha256(credentialId)). */
+function provesLocator(credentialId: unknown, locator: string): boolean {
+  if (typeof credentialId !== "string" || !CIPHERTEXT_PATTERN.test(credentialId)) return false;
+  let bytes: Uint8Array;
+  try {
+    bytes = base64urlnopad.decode(credentialId);
+  } catch {
+    return false;
+  }
+  return bytes.length > 0 && base64urlnopad.encode(sha256(bytes)) === locator;
 }
 
 export const rootVaultRouter = new Hono<{ Bindings: CloudflareBindings }>()
@@ -202,11 +204,6 @@ export const rootVaultRouter = new Hono<{ Bindings: CloudflareBindings }>()
     const locator = c.req.param("locator");
     if (!LOCATOR_PATTERN.test(locator)) {
       return c.json({ error: "invalid_locator" }, 400, noStoreHeaders());
-    }
-
-    const contentLength = Number(c.req.header("content-length") ?? "0");
-    if (Number.isFinite(contentLength) && contentLength > MAX_REQUEST_BYTES) {
-      return c.json({ error: "record_too_large" }, 413, noStoreHeaders());
     }
 
     const decoded = await readLimitedJson(c.req.raw, MAX_REQUEST_BYTES);
@@ -307,9 +304,10 @@ export const rootVaultRouter = new Hono<{ Bindings: CloudflareBindings }>()
   })
   /**
    * Adopt a row written before the owner index existed. Only an unowned row
-   * (or one this owner already holds) can be claimed, and every new row is
-   * created owned, so this can never take over a current row. Claiming also
-   * binds the row to the signing did when it has none yet.
+   * (or one this owner already holds) can be claimed, only with the passkey's
+   * credential ID as proof (`readMetaBody`), so this can never take over a
+   * current row or someone else's legacy one. Claiming also binds the row to
+   * the signing did when it has none yet.
    */
   .put("/vault/root/:locator/owner", async (c) => {
     const locator = c.req.param("locator");
@@ -318,7 +316,7 @@ export const rootVaultRouter = new Hono<{ Bindings: CloudflareBindings }>()
     if (typeof owner !== "string") return unauthorized(c);
     const did = await signer(c, `/vault/root/${locator}/owner`);
     if (did === null) return unauthorized(c);
-    const body = await readMetaBody(c);
+    const body = await readMetaBody(c, locator);
     if (!body.ok) return body.response;
     const claimed = await c.env.INBOX_DB.prepare(
       `UPDATE root_vaults SET owner = ?, meta = ?, owner_did = ?
