@@ -75,13 +75,7 @@ async function fetchRoute(request: Request) {
 
 describe("root vault endpoints", () => {
   test("creates and reads an opaque vault record", async () => {
-    const created = await fetchRoute(
-      new Request(`https://creds.id/vault/root/${LOCATOR}`, {
-        method: "PUT",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(RECORD),
-      }),
-    );
+    const created = await putVault(LOCATOR, RECORD, bearer(OWNER_SECRET));
     expect(created.status).toBe(201);
     expect(await created.json()).toEqual(RECORD);
 
@@ -94,14 +88,7 @@ describe("root vault endpoints", () => {
   });
 
   test("is idempotent for the same bytes and rejects replacement ciphertext", async () => {
-    const put = (record: typeof RECORD) =>
-      fetchRoute(
-        new Request(`https://creds.id/vault/root/${LOCATOR}`, {
-          method: "PUT",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(record),
-        }),
-      );
+    const put = (record: typeof RECORD) => putVault(LOCATOR, record, bearer(OWNER_SECRET));
 
     expect((await put(RECORD)).status).toBe(201);
     expect((await put(RECORD)).status).toBe(200);
@@ -112,13 +99,7 @@ describe("root vault endpoints", () => {
   });
 
   test("accepts no identity metadata and discloses no existence for malformed locators", async () => {
-    const metadata = await fetchRoute(
-      new Request(`https://creds.id/vault/root/${LOCATOR}`, {
-        method: "PUT",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ ...RECORD, did: "did:key:plaintext" }),
-      }),
-    );
+    const metadata = await putVault(LOCATOR, { ...RECORD, did: "did:key:plaintext" }, bearer(OWNER_SECRET));
     expect(metadata.status).toBe(400);
 
     const malformed = await fetchRoute(
@@ -192,6 +173,13 @@ async function putVault(
   );
 }
 
+/** A row written before the owner index existed (no owner, no owner did) — no client can create one any more. */
+function seedLegacyRow(locator: string) {
+  sqlite
+    .query("INSERT INTO root_vaults (locator, version, ciphertext, created_at) VALUES (?, ?, ?, ?)")
+    .run(locator, RECORD.v, RECORD.ciphertext, 1);
+}
+
 async function list(secret?: string) {
   return fetchRoute(
     new Request("https://creds.id/vault/root", {
@@ -201,6 +189,20 @@ async function list(secret?: string) {
 }
 
 describe("root vault owner index", () => {
+  test("refuses a write with no owner, so no new row is ever unowned", async () => {
+    expect((await putVault(LOCATOR, RECORD)).status).toBe(401);
+    // An owner secret without the root did's signature is not enough either.
+    const unsigned = await fetchRoute(
+      new Request(`https://creds.id/vault/root/${LOCATOR}`, {
+        method: "PUT",
+        headers: { "content-type": "application/json", ...bearer(OWNER_SECRET), "x-creds-signature": "x" },
+        body: JSON.stringify(RECORD),
+      }),
+    );
+    expect(unsigned.status).toBe(401);
+    expect(sqlite.query("SELECT COUNT(*) AS n FROM root_vaults").get()).toEqual({ n: 0 });
+  });
+
   test("an owned create lists for that owner only and the public read stays ciphertext-only", async () => {
     expect(
       (await putVault(LOCATOR, { ...RECORD, meta: META }, bearer(OWNER_SECRET))).status,
@@ -246,7 +248,7 @@ describe("root vault owner index", () => {
   test("rejects malformed meta", async () => {
     expect((await putVault(LOCATOR, { ...RECORD, meta: "not base64url!" }, bearer(OWNER_SECRET))).status).toBe(400);
     expect((await putVault(LOCATOR, { ...RECORD, meta: "M".repeat(3000) }, bearer(OWNER_SECRET))).status).toBe(400);
-    expect((await putVault(LOCATOR, { ...RECORD, meta: META })).status).toBe(400);
+    expect((await putVault(LOCATOR, { ...RECORD, meta: META })).status).toBe(401);
   });
 
   test("renames only for the owner and hides other owners' rows", async () => {
@@ -268,7 +270,7 @@ describe("root vault owner index", () => {
   });
 
   test("claims a legacy unowned row once, never someone else's", async () => {
-    await putVault(CLAIMABLE, RECORD);
+    seedLegacyRow(CLAIMABLE);
     const claim = (secret: string, body: Record<string, unknown> = { meta: META, credentialId: CREDENTIAL_ID }) =>
       fetchRoute(
         new Request(`https://creds.id/vault/root/${CLAIMABLE}/owner`, {
@@ -287,7 +289,7 @@ describe("root vault owner index", () => {
   });
 
   test("knowing only the locator cannot claim a legacy row", async () => {
-    await putVault(CLAIMABLE, RECORD);
+    seedLegacyRow(CLAIMABLE);
     const claim = (body: Record<string, unknown>) =>
       fetchRoute(
         new Request(`https://creds.id/vault/root/${CLAIMABLE}/owner`, {
@@ -304,7 +306,7 @@ describe("root vault owner index", () => {
   });
 
   test("deletes only for the owner; an unowned row cannot be deleted", async () => {
-    await putVault(LOCATOR, RECORD);
+    seedLegacyRow(LOCATOR);
     await putVault(LOCATOR_2, RECORD, bearer(OWNER_SECRET));
     const del = (locator: string, secret?: string) =>
       fetchRoute(

@@ -218,26 +218,23 @@ export const rootVaultRouter = new Hono<{ Bindings: CloudflareBindings }>()
     if (!isRecord(body)) {
       return c.json({ error: "invalid_record" }, 400, noStoreHeaders());
     }
+    // Every new row is owned and bound to the signing did: an unowned row can
+    // be claimed later by whoever learns its locator, so none are created any
+    // more (every released client sends an owner; legacy rows stay readable).
     const owner = ownerHash(c);
-    if (owner === null) return unauthorized(c);
-    // Metadata is only readable through an owner listing; an unowned row has no use for it.
-    if (owner === undefined && body.meta !== undefined) {
-      return c.json({ error: "invalid_record" }, 400, noStoreHeaders());
-    }
-    const ownerDid = owner === undefined ? null : await signer(c, `/vault/root/${locator}`);
-    if (owner !== undefined && ownerDid === null) return unauthorized(c);
+    if (typeof owner !== "string") return unauthorized(c);
+    const ownerDid = await signer(c, `/vault/root/${locator}`);
+    if (ownerDid === null) return unauthorized(c);
     const meta = body.meta ?? null;
     const record = { v: body.v, ciphertext: body.ciphertext };
 
-    if (owner !== undefined) {
-      const count = await c.env.INBOX_DB.prepare(
-        "SELECT COUNT(*) AS n FROM root_vaults WHERE owner = ? AND locator <> ?",
-      )
-        .bind(owner, locator)
-        .first<{ n: number }>();
-      if ((count?.n ?? 0) >= MAX_ROWS_PER_OWNER) {
-        return c.json({ error: "too_many_vaults" }, 409, noStoreHeaders());
-      }
+    const count = await c.env.INBOX_DB.prepare(
+      "SELECT COUNT(*) AS n FROM root_vaults WHERE owner = ? AND locator <> ?",
+    )
+      .bind(owner, locator)
+      .first<{ n: number }>();
+    if ((count?.n ?? 0) >= MAX_ROWS_PER_OWNER) {
+      return c.json({ error: "too_many_vaults" }, 409, noStoreHeaders());
     }
 
     const createdAt = Math.floor(Date.now() / 1_000);
@@ -245,7 +242,7 @@ export const rootVaultRouter = new Hono<{ Bindings: CloudflareBindings }>()
       `INSERT OR IGNORE INTO root_vaults (locator, version, ciphertext, created_at, owner, meta, owner_did)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
     )
-      .bind(locator, body.v, body.ciphertext, createdAt, owner ?? null, meta, ownerDid)
+      .bind(locator, body.v, body.ciphertext, createdAt, owner, meta, ownerDid)
       .run();
 
     if ((insert.meta.changes ?? 0) > 0) {
@@ -260,7 +257,7 @@ export const rootVaultRouter = new Hono<{ Bindings: CloudflareBindings }>()
     if (
       existing?.version === body.v &&
       existing.ciphertext === body.ciphertext &&
-      existing.owner === (owner ?? null) &&
+      existing.owner === owner &&
       existing.meta === meta &&
       existing.owner_did === ownerDid
     ) {
