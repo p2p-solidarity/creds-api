@@ -1,6 +1,7 @@
 import { createRoute } from "@hono/zod-openapi";
 import type { Context } from "hono";
 import type { CloudflareBindings } from "../../types/bindings";
+import { readLimitedBody } from "../../lib/readLimitedBody";
 import { verifyNip98Authorization } from "../../lib/nip05/auth";
 import { purgeDirectoryCaches } from "../../lib/nip05/cache";
 import { NIP05_DOMAIN } from "../../lib/nip05/constants";
@@ -9,6 +10,8 @@ import { parseRegisterBody } from "../../lib/nip05/request";
 import { ErrorSchema, RegisterResponseSchema } from "./schemas";
 
 const textDecoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: false });
+/** Far above any real request; stops an oversized upload before it is buffered. */
+const MAX_BODY_BYTES = 16_384;
 
 // The body is intentionally not declared for schema validation: NIP-98
 // authorization hashes the raw request bytes, so the handler must read them
@@ -25,6 +28,14 @@ export const registerRoute = createRoute({
       content: {
         "application/json": {
           schema: RegisterResponseSchema,
+        },
+      },
+    },
+    413: {
+      description: "Request body over the size limit",
+      content: {
+        "application/json": {
+          schema: ErrorSchema,
         },
       },
     },
@@ -83,7 +94,12 @@ export const registerHandler = async (c: Context<{ Bindings: CloudflareBindings 
     return c.json({ error: "rate_limit_exceeded" }, 429);
   }
 
-  const rawBodyBytes = new Uint8Array(await c.req.raw.arrayBuffer());
+  const read = await readLimitedBody(c.req.raw, MAX_BODY_BYTES);
+  if (!read.ok) {
+    if (read.tooLarge) return c.json({ error: "request_too_large" }, 413);
+    return c.json({ error: "invalid_request" }, 400);
+  }
+  const rawBodyBytes = read.bytes;
   let rawBody: string;
   try {
     rawBody = textDecoder.decode(rawBodyBytes);
