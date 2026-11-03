@@ -19,6 +19,7 @@ import { didKeyFromScalar, mintLicense } from "../../lib/pro/license";
 import { lookupAppStore, lookupPlay } from "../../lib/pro/stores";
 import { SIGNED_REQUEST_HEADER, verifySignedRequest } from "../../lib/signedRequest";
 import type { CloudflareBindings } from "../../types/bindings";
+import { readLimitedBody } from "../../lib/readLimitedBody";
 
 const AUDIENCE = "creds.id/pro/license";
 const REQUEST_WINDOW_SECONDS = 300;
@@ -68,12 +69,19 @@ proRouter.delete("/pro/binding", async (c) => {
 
 proRouter.post("/pro/license", async (c) => {
   if (!c.env.LICENSE_SIGNING_KEY) return c.json({ error: "not_configured" }, 503);
+  // `request` is capped at 4 KB below, so nothing larger is ever buffered.
+  const read = await readLimitedBody(c.req.raw, 8_192);
+  if (!read.ok) {
+    if (read.tooLarge) return c.json({ error: "request_too_large" }, 413);
+    return c.json({ error: "invalid_request" }, 400);
+  }
   let body: { request?: unknown };
   try {
-    body = await c.req.json();
+    body = JSON.parse(new TextDecoder().decode(read.bytes)) as { request?: unknown };
   } catch {
     return c.json({ error: "invalid_request" }, 400);
   }
+  if (typeof body !== "object" || body === null) return c.json({ error: "invalid_request" }, 400);
   if (typeof body.request !== "string" || body.request.length > 4096) return c.json({ error: "invalid_request" }, 400);
 
   // The did signs its own request: only the identity that will hold the license can ask for it.

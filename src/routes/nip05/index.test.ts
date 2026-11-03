@@ -319,6 +319,29 @@ describe("NIP-05 endpoints", () => {
     });
   });
 
+  test("refuses an oversized register or recover body before reading it all", async () => {
+    for (const path of ["/id/register", "/id/recover"]) {
+      const url = `https://creds.id${path}`;
+      const body = JSON.stringify({ name: "alicex", consent: true, pad: "x".repeat(20_000) });
+      // Streamed with no Content-Length, so only the running byte count can stop it.
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(body));
+          controller.close();
+        },
+      });
+      const request = new Request(url, {
+        method: "POST",
+        headers: { authorization: authorization("POST", url, body), "content-type": "application/json" },
+        body: stream,
+      });
+      request.headers.delete("content-length");
+      const response = await fetchRoute(request);
+      expect(response.status).toBe(413);
+      expect(await response.json()).toEqual({ error: "request_too_large" });
+    }
+  });
+
   test("refuses recovery without evidence instead of falling back to a human", async () => {
     const url = "https://creds.id/id/recover";
     const body = JSON.stringify({
