@@ -322,7 +322,7 @@ describe("NIP-05 endpoints", () => {
   test("refuses an oversized register or recover body before reading it all", async () => {
     for (const path of ["/id/register", "/id/recover"]) {
       const url = `https://creds.id${path}`;
-      const body = JSON.stringify({ name: "alicex", consent: true, pad: "x".repeat(20_000) });
+      const body = JSON.stringify({ name: "alicex", consent: true, pad: "x".repeat(40_000) });
       // Streamed with no Content-Length, so only the running byte count can stop it.
       const stream = new ReadableStream<Uint8Array>({
         start(controller) {

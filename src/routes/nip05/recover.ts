@@ -4,7 +4,7 @@ import type { CloudflareBindings } from "../../types/bindings";
 import { readLimitedBody } from "../../lib/readLimitedBody";
 import { verifyNip98Authorization } from "../../lib/nip05/auth";
 import { purgeDirectoryCaches } from "../../lib/nip05/cache";
-import { NIP05_DOMAIN } from "../../lib/nip05/constants";
+import { MAX_OLD_RECORD_JWS_BYTES, NIP05_DOMAIN } from "../../lib/nip05/constants";
 import { createWorkerResolverIO } from "../../lib/nip05/dnsBinding";
 import { verifyRecoveryEvidence } from "../../lib/nip05/recovery";
 import {
@@ -15,8 +15,11 @@ import { parseRecoverBody } from "../../lib/nip05/request";
 import { ErrorSchema, RecoverResponseSchema } from "./schemas";
 
 const textDecoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: false });
-/** Far above any real request; stops an oversized upload before it is buffered. */
-const MAX_BODY_BYTES = 16_384;
+/**
+ * Two record JWS (each capped at `MAX_OLD_RECORD_JWS_BYTES`) plus small fields;
+ * stops an oversized upload before it is buffered.
+ */
+const MAX_BODY_BYTES = 2 * MAX_OLD_RECORD_JWS_BYTES + 4_096;
 
 // Body is read raw, not schema-validated by the router: NIP-98 hashes the
 // exact request bytes, so any normalisation would break the payload check.
