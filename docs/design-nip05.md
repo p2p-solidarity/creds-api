@@ -167,9 +167,9 @@ createdAt  integer NOT NULL
 - **保留名單**(const 檔,code review 即可增修):`_`, `admin`, `administrator`, `root`, `solidarity`, `airmeishi`, `support`, `help`, `security`, `abuse`, `www`, `mail`, `postmaster`, `nostr`, `verify`, `verified`, `id`, `official`, `pay`, `billing`, `api`, `dev`, `team`, `staff`。
 - **Tombstone(取代 quarantine,G3)**:released 的 name **永久保留該列、永不重新分配**。原 pubkey 可**無限期** reclaim(register 同名 → 直接復活該列,不算改名);其他 pubkey 查 availability 恆得 `tombstoned`、register 恆得 409。這同時擋掉「註銷即被搶註冒充」,並讓 `/@name` 成為可印在名片上的短連結。
 - **改名頻率**:單一 pubkey 90 天內 name 實際變更 ≤ 1 次;首次註冊與同名冪等更新不算改名。
-- **IP 護欄**:全域已有 100/60s;`/id/register` 另掛第二個 ratelimit binding(`REGISTER_RATE_LIMITER`,5/60s per IP,wrangler.jsonc 新增 namespace 1002)。
+- **IP 護欄**:全域已有 100/60s;`/id/register` 另有精確的 per-IP 限流:Durable Object `Nip05WriteLimiter`(5/60s sliding window,`src/lib/writeLimiter.ts`)。ratelimit binding 只是近似值,2026-11-04 實測線上從不回 429;zone 前面另有一條 WAF rate-limiting rule。
 - **資料保存**:audit 列保存 90 天後由 cron 清除(同意收據保留窗)。**`nip05_handles` 的列一律不刪**(G3 tombstone)—— cron 只清 audit。掛進現有 hourly cron(`src/schedules/index.ts`),與 inbox cleanup 並列、互不影響(單邊失敗不可拖垮另一邊)。
-- **恢復頻率**:`/id/recover` 共用 `REGISTER_RATE_LIMITER`(5/60s per IP);單一 name 的 `rebindGeneration` 不設上限,但每次都永久累加且對外可見(G5)。
+- **恢復頻率**:`/id/recover` 與 register 共用同一個 `Nip05WriteLimiter` 計數(5/60s per IP);單一 name 的 `rebindGeneration` 不設上限,但每次都永久累加且對外可見(G5)。
 
 ## 5. 部署(ops,不在 codex 範圍)
 

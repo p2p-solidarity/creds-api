@@ -99,8 +99,9 @@ beforeEach(async () => {
   });
   env = {
     INBOX_DB: new TestD1Database(sqlite) as unknown as D1Database,
-    REGISTER_RATE_LIMITER: {
-      limit: async () => ({ success: true }),
+    NIP05_WRITE_LIMITER: {
+      idFromName: (name: string) => name,
+      get: () => ({ fetch: async () => Response.json({ allowed: true }) }),
     },
   } as unknown as CloudflareBindings;
   executionContext = {

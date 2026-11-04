@@ -7,6 +7,8 @@ import { rootVaultRouter } from "./routes/rootVault";
 import { runNip05Cleanup } from "./schedules/index";
 import type { CloudflareBindings } from "./types/bindings";
 
+export { Nip05WriteLimiter } from "./lib/writeLimiter";
+
 /**
  * NIP-05 directory worker — the `creds.id` id service on its own.
  *

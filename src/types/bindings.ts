@@ -1,13 +1,12 @@
-import type { D1Database } from "@cloudflare/workers-types";
+import type { D1Database, DurableObjectNamespace } from "@cloudflare/workers-types";
 
 export interface CloudflareBindings {
   // Rate limiter binding
   RATE_LIMITER: {
     limit: (options: { key: string }) => Promise<{ success: boolean }>;
   };
-  REGISTER_RATE_LIMITER: {
-    limit: (options: { key: string }) => Promise<{ success: boolean }>;
-  };
+  /** One Durable Object per client IP for `/id/register` + `/id/recover`. */
+  NIP05_WRITE_LIMITER: DurableObjectNamespace;
 
   // The creds.id D1 (`solidarity_id`); the binding name predates the split.
   INBOX_DB: D1Database;

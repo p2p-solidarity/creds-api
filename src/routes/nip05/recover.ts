@@ -2,6 +2,7 @@ import { createRoute } from "@hono/zod-openapi";
 import type { Context } from "hono";
 import type { CloudflareBindings } from "../../types/bindings";
 import { readLimitedBody } from "../../lib/readLimitedBody";
+import { admitNip05Write } from "../../lib/writeLimiter";
 import { verifyNip98Authorization } from "../../lib/nip05/auth";
 import { purgeDirectoryCaches } from "../../lib/nip05/cache";
 import { MAX_OLD_RECORD_JWS_BYTES, NIP05_DOMAIN } from "../../lib/nip05/constants";
@@ -80,8 +81,7 @@ export const recoverHandler = async (
     c.req.header("cf-connecting-ip") ||
     c.req.header("x-forwarded-for") ||
     "unknown";
-  const { success } = await c.env.REGISTER_RATE_LIMITER.limit({ key: clientIp });
-  if (!success) {
+  if (!(await admitNip05Write(c.env, clientIp))) {
     return c.json({ error: "rate_limit_exceeded" }, 429);
   }
 
