@@ -4,49 +4,18 @@
 	"main": "src/index.ts",
 	"account_id": "8ed27adf5fb9847bb469619634095076",
 	"compatibility_date": "2025-09-13",
-	"compatibility_flags": [
-		"nodejs_compat"
-	],
 	"observability": {
 		"enabled": true,
 		"head_sampling_rate": 1
 	},
-	// This worker (inbox / PassKit) is reached on its workers.dev hostname — the
-	// app's EXPO_PUBLIC_SAKURA_API_URL. Kept explicit so a deploy never silently
-	// flips it (wrangler defaults it to false when unset). The NIP-05 directory
-	// routes on solidarity.gg live in `wrangler.nip05.jsonc`: that zone belongs
-	// to a different Cloudflare account, and a route can only be attached from
-	// the zone's own account (`bun run deploy:nip05`).
+	// Retired 2026-11-04: only the account-deletion stub in `src/index.ts` is
+	// left, on its workers.dev hostname, because app 2.0.0 calls it there. No
+	// D1, no secrets, no cron, no custom domain. The creds.id services deploy
+	// from `wrangler.nip05.jsonc` into the account that owns the zone
+	// (`bun run deploy:nip05`).
 	"workers_dev": true,
-	"d1_databases": [
-		{
-			"binding": "INBOX_DB",
-			"database_name": "airmeishi_inbox",
-			"database_id": "16045bea-3347-472b-9652-f320cab7f9d2",
-			"migrations_dir": "drizzle"
-		}
-	],
-	"ratelimits": [
-		{
-			"name": "RATE_LIMITER",
-			"namespace_id": "1001",
-			"simple": {
-				"limit": 100,
-				"period": 60
-			}
-		},
-		{
-			"name": "REGISTER_RATE_LIMITER",
-			"namespace_id": "1002",
-			"simple": {
-				"limit": 5,
-				"period": 60
-			}
-		}
-	],
+	// An empty list removes the old hourly inbox-cleanup trigger on deploy.
 	"triggers": {
-		"crons": [
-			"0 * * * *"
-		]
+		"crons": []
 	}
 }

@@ -1,15 +1,6 @@
-import { createInboxDb, purgeExpiredMessages } from "../lib/inbox/repository";
 import { purgeExpiredNip05Data } from "../lib/nip05/repository";
 import { purgeExpiredNonces } from "../lib/signedRequest";
 import type { CloudflareBindings } from "../types/bindings";
-
-export async function runInboxCleanup(env: CloudflareBindings) {
-  const db = createInboxDb(env.INBOX_DB);
-  const cutoffSeconds = Math.floor(Date.now() / 1000) - 60 * 60 * 24;
-  const removed = await purgeExpiredMessages(db, cutoffSeconds);
-  console.log(`🧹 Purged ${removed} expired inbox entries`);
-  await purgeExpiredNonces(env.INBOX_DB, Math.floor(Date.now() / 1000));
-}
 
 // Handle rows are permanent tombstones (design G3) and are never purged —
 // deleting one would quietly free the name for a stranger to take.
