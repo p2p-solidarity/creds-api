@@ -40,7 +40,7 @@ describe("validateNip05Name", () => {
 
   test("classifies reserved names independently from syntax", () => {
     expect(isReservedNip05Name("ADMIN")).toBe(true);
-    expect(isReservedNip05Name("_")).toBe(true);
+    expect(isReservedNip05Name("edit")).toBe(true);
     expect(isReservedNip05Name("alicex")).toBe(false);
   });
 

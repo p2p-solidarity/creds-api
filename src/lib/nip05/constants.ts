@@ -1,3 +1,5 @@
+import { RESERVED_NAMES } from "@solidarity/shared/credsPath";
+
 export const NIP05_DOMAIN = "creds.id";
 
 /**
@@ -18,53 +20,11 @@ export const NIP05_NAME_MIN_LENGTH = 3;
 export const NIP05_NAME_MAX_LENGTH = 30;
 
 /**
- * Words never issued as names. Every name-shaped top-level path on creds.id
- * must be in here before it ships: add the word while it is still available
- * (`GET /id/availability`) — a name already issued is never taken back.
- * Design and per-group reasons: airmeishi docs/ref/15-plan-bare-name-url.md §3–§4.
+ * Words never issued as names — the same table every creds.id URL reader uses
+ * (`@solidarity/shared` handles/credsPath.ts, airmeishi docs/ref/15). Add a word
+ * there, re-vendor shared, deploy this Worker, then ship the page.
  */
-export const RESERVED_NIP05_NAMES: ReadonlySet<string> = new Set([
-  // Paths the site, app links and workers already use (`_`, `c` and `id`
-  // cannot match the name shape).
-  "app", "edit", "privacy", "terms", "websign", "pear", "vault", "pro", "api",
-  "assets", "index", "_", "c", "id",
-  // Likely future site pages and product words.
-  "account", "accounts", "login", "logout", "signin", "signout", "signup",
-  "register", "settings", "profile", "profiles", "about", "docs", "faq",
-  "blog", "download", "downloads", "pricing", "upgrade", "status", "search",
-  "explore", "new", "create", "claim", "share", "scan", "check", "present",
-  "people", "contacts", "card", "cards", "page", "pages", "link", "links",
-  "embed", "widget", "home", "dashboard", "inbox", "notary", "witness",
-  "witnesses", "badge", "badges", "proof", "proofs", "passport", "passkey",
-  "passkeys", "recover", "recovery", "backup", "restore", "delete", "oauth",
-  "auth", "callback", "sso", "license", "licenses", "cookies", "policy",
-  "policies", "contact", "feedback", "report", "dmca", "copyright", "careers",
-  "jobs", "press", "brand", "community", "developer", "developers", "sdk",
-  "static", "media", "images", "files", "uploads", "cdn", "sitemap", "robots",
-  "favicon", "manifest", "rss", "feed", "webhook", "webhooks", "graphql",
-  "relay", "relays", "nip05", "did", "lnurl", "ios", "android", "user",
-  "users", "wallet", "attest", "attestation",
-  // Trust and impersonation.
-  "admin", "administrator", "root", "system", "official", "verified",
-  "verification", "verify", "security", "abuse", "support", "help",
-  "helpdesk", "moderator", "mod", "staff", "team", "bot", "solidarity",
-  "solidaritygg", "airmeishi", "creds", "credsid", "credentials", "nostr",
-  "legal", "billing", "pay", "payment", "invoice",
-  // Mailbox and DNS names: `name@creds.id` reads as an email address, and CAs
-  // validate a domain through admin@, administrator@, webmaster@, hostmaster@
-  // and postmaster@.
-  "postmaster", "hostmaster", "webmaster", "www", "mail", "smtp", "ftp",
-  "ns1", "ns2", "info", "noc", "noreply", "mailerdaemon",
-  // Placeholders and examples shown in copy; mika/theo/rin/ada are the home
-  // page personas.
-  "you", "yourname", "name", "username", "handle", "example", "demo", "test",
-  "dev", "staging", "null", "undefined", "none", "nobody", "anonymous",
-  "everyone", "true", "false", "mika", "theo", "rin", "ada",
-  // Platforms a Page shows badges for, and the resolver scheme names.
-  "twitter", "github", "telegram", "bluesky", "bsky", "youtube", "spotify",
-  "instagram", "threads", "tiktok", "linkedin", "facebook", "apple", "google",
-  "atproto", "ens", "dns",
-]);
+export const RESERVED_NIP05_NAMES: ReadonlySet<string> = RESERVED_NAMES;
 
 export const AUDIT_RETENTION_SECONDS = 90 * 24 * 60 * 60;
 export const RENAME_WINDOW_SECONDS = 90 * 24 * 60 * 60;
