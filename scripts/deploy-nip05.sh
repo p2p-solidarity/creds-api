@@ -29,9 +29,16 @@ echo "▸ account ${account} (from ${CONFIG})"
 
 # 1. D1 — reuse if it exists, otherwise create it. The list is fetched with
 #    the nip05 config so it is THAT account's list.
-db_id="$(w d1 list --json 2>/dev/null \
-  | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const rows=JSON.parse(s);const hit=rows.find(r=>r.name===process.argv[1]);process.stdout.write(hit?hit.uuid:"")})' "$DB_NAME" \
-  || true)"
+# A failed list must stop the run: reading it as "no database" would try to create one.
+if ! list_out="$(w d1 list --json 2>/dev/null)"; then
+  echo "✘ wrangler d1 list failed; not creating a database. Re-run, or check 'wrangler whoami'." >&2
+  exit 1
+fi
+if ! db_id="$(printf '%s' "$list_out" \
+  | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const rows=JSON.parse(s);const hit=rows.find(r=>r.name===process.argv[1]);process.stdout.write(hit?hit.uuid:"")})' "$DB_NAME")"; then
+  echo "✘ could not read the D1 list as JSON; not creating a database." >&2
+  exit 1
+fi
 if [ -z "$db_id" ]; then
   echo "▸ creating D1 ${DB_NAME}"
   if ! out="$(w d1 create "$DB_NAME" 2>&1)"; then
