@@ -13,7 +13,7 @@ export const eraseRoute = createRoute({
   summary: "Account deletion: unlink every name of the authenticated pubkey",
   responses: {
     200: {
-      description: "Names that were unlinked (they stay reserved as tombstones)",
+      description: "Names that were unlinked (unclaimable for 7 days, then open to anyone as a rebind)",
       content: { "application/json": { schema: EraseResponseSchema } },
     },
     401: {

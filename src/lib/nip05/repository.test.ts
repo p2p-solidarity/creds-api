@@ -1,7 +1,10 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import type { D1Database } from "@cloudflare/workers-types";
+import { ERASED_NAME_COOLDOWN_SECONDS } from "./constants";
 import {
+  ERASED_PUBKEY,
+  eraseHandlesForPubkey,
   findActiveDirectoryEntry,
   getHandleRebindInfo,
   getStoredNameState,
@@ -32,6 +35,10 @@ class TestPreparedStatement {
     return (this.database.query(this.sql).get(...this.bindings) as T | null) ?? null;
   }
 
+  async all<T>(): Promise<{ results: T[] }> {
+    return { results: this.database.query(this.sql).all(...this.bindings) as T[] };
+  }
+
   run() {
     const result = this.database.query(this.sql).run(...this.bindings);
     return {
@@ -56,6 +63,7 @@ class TestD1Database {
 
 const PUBKEY_A = "a".repeat(64);
 const PUBKEY_B = "b".repeat(64);
+const PUBKEY_C = "c".repeat(64);
 const START_TIME = 2_000_000_000;
 
 let sqlite: Database;
@@ -380,6 +388,111 @@ describe("NIP-05 repository", () => {
     expect(await releaseHandle(d1, input)).toEqual({
       ok: false,
       error: "replay",
+    });
+  });
+
+  // G3a. An erased name (account deleted, or blocked by the operator) has no
+  // holder left who could reclaim it, so after the cooldown anyone may take it
+  // over — on the SAME row, so G5's rebind marker tells holders of an old link.
+  describe("erased-name release", () => {
+    const ERASED_AT = START_TIME + 1_000;
+    const COOLED = ERASED_AT + ERASED_NAME_COOLDOWN_SECONDS;
+
+    function rawRow(name: string) {
+      return sqlite
+        .query("SELECT * FROM nip05_handles WHERE name = ?")
+        .get(name) as Record<string, unknown>;
+    }
+
+    test("stays taken for everyone until the cooldown ends", async () => {
+      await registerHandle(d1, registration("alice"));
+      await eraseHandlesForPubkey(d1, { pubkey: PUBKEY_A, nowSeconds: ERASED_AT });
+
+      expect(await getStoredNameState(d1, "alice", COOLED - 1)).toEqual({ state: "tombstoned" });
+      expect(
+        await registerHandle(d1, registration("alice", { pubkey: PUBKEY_B, nowSeconds: COOLED - 1 })),
+      ).toEqual({ ok: false, error: "name_taken" });
+      expect(rawRow("alice")).toMatchObject({ pubkey: ERASED_PUBKEY, status: "released" });
+    });
+
+    test("after the cooldown a new key takes over the same row as a rebind", async () => {
+      await registerHandle(d1, registration("alice"));
+      await eraseHandlesForPubkey(d1, { pubkey: PUBKEY_A, nowSeconds: ERASED_AT });
+
+      expect(await getStoredNameState(d1, "alice", COOLED)).toEqual({ state: "available" });
+      expect(
+        await registerHandle(
+          d1,
+          registration("alice", { pubkey: PUBKEY_B, relays: ["wss://relay.example"], nowSeconds: COOLED }),
+        ),
+      ).toEqual({ ok: true, name: "alice", pubkey: PUBKEY_B, previousName: null });
+
+      expect(await findActiveDirectoryEntry(d1, "alice")).toEqual({
+        name: "alice",
+        pubkey: PUBKEY_B,
+        relays: ["wss://relay.example"],
+      });
+      expect(await getHandleRebindInfo(d1, "alice", COOLED)).toMatchObject({
+        status: "active",
+        rebindGeneration: 1,
+        reboundAt: COOLED,
+      });
+      expect(rawRow("alice")).toMatchObject({ created_at: COOLED, released_at: null });
+      expect(await getStoredNameState(d1, "alice", COOLED)).toEqual({ state: "taken" });
+    });
+
+    test("the cooldown runs from the erase, not from an older release", async () => {
+      await registerHandle(d1, registration("alice"));
+      await registerHandle(d1, registration("bravo"));
+      // `alice` was released by the rename long before the account went away.
+      const erasedAt = START_TIME + A_YEAR;
+      await eraseHandlesForPubkey(d1, { pubkey: PUBKEY_A, nowSeconds: erasedAt });
+
+      expect(
+        await registerHandle(d1, registration("alice", { pubkey: PUBKEY_B, nowSeconds: erasedAt + 1 })),
+      ).toEqual({ ok: false, error: "name_taken" });
+      expect(
+        await registerHandle(
+          d1,
+          registration("alice", { pubkey: PUBKEY_B, nowSeconds: erasedAt + ERASED_NAME_COOLDOWN_SECONDS }),
+        ),
+      ).toMatchObject({ ok: true, pubkey: PUBKEY_B });
+    });
+
+    test("a claimant who already holds a name renames under the usual window", async () => {
+      await registerHandle(d1, registration("alice"));
+      await registerHandle(d1, registration("delta", { pubkey: PUBKEY_C }));
+      await eraseHandlesForPubkey(d1, { pubkey: PUBKEY_A, nowSeconds: ERASED_AT });
+      await eraseHandlesForPubkey(d1, { pubkey: PUBKEY_C, nowSeconds: ERASED_AT });
+      await registerHandle(d1, registration("carol", { pubkey: PUBKEY_B, nowSeconds: ERASED_AT + 1 }));
+
+      expect(
+        await registerHandle(d1, registration("alice", { pubkey: PUBKEY_B, nowSeconds: COOLED })),
+      ).toEqual({ ok: true, name: "alice", pubkey: PUBKEY_B, previousName: "carol" });
+      expect(await getHandleRebindInfo(d1, "carol", COOLED)).toMatchObject({
+        status: "redirected",
+        redirectTo: "alice",
+      });
+      expect(
+        await registerHandle(d1, registration("delta", { pubkey: PUBKEY_B, nowSeconds: COOLED + 1 })),
+      ).toMatchObject({ ok: false, error: "rename_too_soon" });
+      expect(rawRow("delta")).toMatchObject({ pubkey: ERASED_PUBKEY });
+    });
+
+    test("once claimed, the name is the new holder's G3 tombstone", async () => {
+      await registerHandle(d1, registration("alice"));
+      await eraseHandlesForPubkey(d1, { pubkey: PUBKEY_A, nowSeconds: ERASED_AT });
+      await registerHandle(d1, registration("alice", { pubkey: PUBKEY_B, nowSeconds: COOLED }));
+
+      expect(
+        await registerHandle(d1, registration("alice", { pubkey: PUBKEY_C, nowSeconds: COOLED + 1 })),
+      ).toEqual({ ok: false, error: "name_taken" });
+
+      await releaseHandle(d1, deletion({ pubkey: PUBKEY_B, nowSeconds: COOLED + 2 }));
+      expect(
+        await registerHandle(d1, registration("alice", { pubkey: PUBKEY_C, nowSeconds: COOLED + A_YEAR })),
+      ).toEqual({ ok: false, error: "name_taken" });
+      expect(await getStoredNameState(d1, "alice", COOLED + A_YEAR)).toEqual({ state: "tombstoned" });
     });
   });
 });

@@ -30,13 +30,15 @@ export const AUDIT_RETENTION_SECONDS = 90 * 24 * 60 * 60;
 export const RENAME_WINDOW_SECONDS = 90 * 24 * 60 * 60;
 export const MAX_RENAMES_PER_WINDOW = 1;
 
-// NOTE — no quarantine-window constant exists any more, and adding one back
-// would be a regression. Released names are tombstoned PERMANENTLY (design
-// §4 / G3): the row is never deleted and never reassigned to a different
-// pubkey, though the original holder may reclaim it indefinitely. That is
-// what lets `/@name` be printed on a business card — a recyclable handle
-// eventually points at a stranger, which is exactly why the app repo's
-// research notes §2.5 ruled handles unfit for print.
+/**
+ * G3a: an ERASED name (account deleted, or blocked by the operator) becomes
+ * claimable by any key this long after the erase. Ordinary released names stay
+ * tombstoned for everyone but their holder (G3) — only erased rows, whose
+ * holder is gone, ever change hands, and they do so as a rebind on the same row
+ * so G5 tells holders of an old link that the key behind the name changed.
+ * Kidney 2026-11-11: short on purpose, so blocking squatters stays manageable.
+ */
+export const ERASED_NAME_COOLDOWN_SECONDS = 7 * 24 * 60 * 60;
 
 /**
  * DoH endpoint for the recovery flow's `_did.<domain>` TXT lookup. Workers

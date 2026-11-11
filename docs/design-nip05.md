@@ -20,6 +20,10 @@
 - **G2 短連結主形態**:`https://app.solidarity.gg/@<name>`(裸名,無 `nip05:` 前綴)。`/@<無點名字>` 這個 namespace 今天沒有任何 resolver 認領,零碰撞。
 - **G3 永久 tombstone、不回收**:released 的 name **永不重新分配給不同的 pubkey**(原 pubkey 可無限期 reclaim)。取代原 §4 的 30 天 quarantine-then-delete。
   - 理由:唯有永不回收,`/@name` 才能印在名片上 —— 這正是 app repo 研究筆記 §2.5 判定「印刷物只能用 fragment」的那條限制,而自營 namespace 的價值就在於能解除它。
+- **G3a erased 名稱 7 天後可認領(2026-11-11,Kidney)**:刪帳號(`DELETE /id/account`)或營運封鎖(`bun run block:nip05 <name>`)會把列改成 `pubkey='erased'`。原持有人已無金鑰可 reclaim,所以 G3 的理由不成立 —— 從 `updated_at` 起算 7 天後,任何 pubkey 都能註冊,但**沿用同一列**:`rebind_generation+1`、`rebound_at=now`、`created_at` 重設。不刪列,否則 generation 歸零,舊連結會無聲指向陌生人。
+  - 理由:180 天之類的長冷卻在初期無法管理,封鎖一批搶註也會讓那批名稱長期凍結。短冷卻的代價是舊版 app(≤2.0.2)不顯示 G5 標記;已存聯絡人以 did 為鍵,不受換人影響。
+  - viewer 只顯示「這個名稱在 {date} 綁定到新的金鑰」提示,**不**把徽章降成 `stale`:新持有人的雙向綁定是真的。這一點取代 G5 的「近 90 天內徽章降 stale」。
+  - 時鐘用 `updated_at` 而非 `released_at`:erase 用 COALESCE 保留舊的 `released_at`(多年前改名留下的舊名),用它算會一刪就被搶。
 - **G4 恢復機制純密碼學驗證、無 admin 後門**(見 §3.5):**不存在任何人工核准端點**,證據為零時一律拒絕。
   - 理由:任何人工恢復路徑都是繞過金鑰的後門,而 viewer 的雙向驗證**結構上擋不住它** —— 攻擊者把 name 改指到自己的 pubkey 後,自己的 kind-0 也寫上同一個 identifier,兩邊完全自洽,綠勾照畫。雙向檢查只證明「當下綁定自洽」,不證明「還是同一個人」。
 - **G5 rebind 永久留痕**:`rebind_generation >= 1` 的 name,viewer 永久顯示「曾經重新綁定」標記,近 90 天內徽章降 `stale`。
@@ -117,7 +121,7 @@ createdAt  integer NOT NULL
 ```
 
 - 同一 pubkey 的 active 唯一性用 partial unique index:`CREATE UNIQUE INDEX ... ON nip05_handles (pubkey) WHERE status = 'active'`(D1/SQLite 支援)。
-- **tombstone 的列永不刪除**(G3):`status='released'` 的列保留原 `pubkey`,原持有者可無限期 reclaim(register 同名 → 復活該列),其他 pubkey 永遠得到 `name_taken`。cron 只清 audit,不再清 handles。
+- **tombstone 的列永不刪除**(G3):`status='released'` 的列保留原 `pubkey`,原持有者可無限期 reclaim(register 同名 → 復活該列),其他 pubkey 永遠得到 `name_taken`(例外:`pubkey='erased'` 的列 7 天後可認領,見 G3a)。cron 只清 audit,不再清 handles。
 - **恢復不需要任何新的儲存**:舊 record 由申請人自行提供,而既有的 `pubkey` 欄位就是讓它不可偽造的錨點(§3.5 第 3 步)。刻意不建 `name → 外部綁定` 的快照表 —— 那會讓本服務開始累積使用者資料,違反 §0.3。
 - migration:只有 `drizzle/0001_nip05.sql`。G1/G3/G5 直接寫進它而非疊一個 0002 —— 本功能尚未 commit 也未 deploy(§5 的 zone 綁定仍是未完成的 ops 項),零資料需要遷移,而 SQLite 無法 ALTER 既有 CHECK 約束,疊加只會換來一次無謂的 table rebuild。schema 在 `src/db/schema.ts`。
 

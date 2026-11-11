@@ -1,6 +1,7 @@
 import type { D1Database, D1Result } from "@cloudflare/workers-types";
 import {
   AUDIT_RETENTION_SECONDS,
+  ERASED_NAME_COOLDOWN_SECONDS,
   RENAME_WINDOW_SECONDS,
 } from "./constants";
 
@@ -105,21 +106,40 @@ export async function findActiveDirectoryEntry(
 }
 
 /**
- * A released name NEVER returns to `available` (G3). The row is a permanent
- * tombstone: only its original holder can reclaim it, and to everyone else
- * the name is gone for good. That is what makes `/@name` safe to print.
+ * A released name never returns to `available` while its holder still has a
+ * key (G3): only that holder can reclaim it. The one exception is an erased
+ * row (G3a) — no holder is left, so once the cooldown ends anyone may claim it,
+ * as a rebind that G5 shows to holders of an old link.
  */
 export async function getStoredNameState(
   db: D1Database,
   name: string,
+  nowSeconds = Math.floor(Date.now() / 1000),
 ): Promise<StoredNameState> {
   const row = await getHandleByName(db, name);
-  if (row === null) {
+  if (row === null || isClaimableErased(row, nowSeconds)) {
     return { state: "available" };
   }
   return row.status === "active"
     ? { state: "taken" }
     : { state: "tombstoned" };
+}
+
+function erasedClaimCutoff(nowSeconds: number): number {
+  return nowSeconds - ERASED_NAME_COOLDOWN_SECONDS;
+}
+
+/** `updated_at`, not `released_at`, is the clock: erase keeps an older
+ *  `released_at` (a name renamed away years ago) but always stamps `updated_at`. */
+function isClaimableErased(
+  row: Pick<HandleRow, "pubkey" | "status" | "updated_at">,
+  nowSeconds: number,
+): boolean {
+  return (
+    row.pubkey === ERASED_PUBKEY &&
+    row.status === "released" &&
+    row.updated_at <= erasedClaimCutoff(nowSeconds)
+  );
 }
 
 export interface HandleRebindInfo {
@@ -179,8 +199,13 @@ export async function registerHandle(
       getMostRecentOtherHandle(db, input.pubkey, input.name),
     ]);
     // G3: a name is unavailable to anyone but its original holder from the
-    // moment it is first taken, forever — active or tombstoned alike.
-    if (target !== null && target.pubkey !== input.pubkey) {
+    // moment it is first taken — active or tombstoned alike. G3a: an erased
+    // row past its cooldown has no holder left and goes to whoever claims it.
+    const claimsErased =
+      target !== null &&
+      input.pubkey !== ERASED_PUBKEY &&
+      isClaimableErased(target, input.nowSeconds);
+    if (target !== null && target.pubkey !== input.pubkey && !claimsErased) {
       return { ok: false, error: "name_taken" };
     }
 
@@ -210,6 +235,7 @@ export async function registerHandle(
     try {
       await executeRegisterBatch(db, input, {
         target,
+        claimsErased,
         active,
         previousRegistration,
         countsAsRename,
@@ -474,9 +500,10 @@ async function executeRecoverBatch(
 }
 
 /**
- * Only audit rows are ever purged. `nip05_handles` rows are permanent (G3) —
- * deleting a tombstone would silently make the name registrable again by a
- * stranger, which is precisely the outcome the tombstone exists to prevent.
+ * Only audit rows are ever purged. `nip05_handles` rows are never deleted —
+ * deleting a tombstone would make the name registrable again with its
+ * `rebind_generation` back at 0, so an old link would point at a stranger
+ * with no G5 marker. Even erased names change hands only by claim (G3a).
  */
 export async function purgeExpiredNip05Data(
   db: D1Database,
@@ -492,8 +519,8 @@ export async function purgeExpiredNip05Data(
 
 /**
  * Stand-in pubkey for an erased holder. Not 64 hex chars, so no NIP-98
- * signer can ever match it: the names stay tombstoned (G3) for everyone,
- * the original holder included.
+ * signer can ever match it: not even the old key can reclaim the name. After
+ * `ERASED_NAME_COOLDOWN_SECONDS` anyone can claim it as a rebind (G3a).
  */
 export const ERASED_PUBKEY = "erased";
 
@@ -502,11 +529,12 @@ export const ERASED_PUBKEY = "erased";
  * released — becomes a released tombstone whose pubkey is `ERASED_PUBKEY`,
  * and the signed audit trail for the pubkey is dropped.
  *
- * The rows themselves are kept on purpose: deleting one would free the name
- * for a stranger to print as `name@creds.id` (the impersonation G3 exists to
- * prevent). Dropping the pubkey is what removes the name↔key link; the cost
- * is that the name can never be reclaimed, even with the old key. A replay of
- * the same NIP-98 event inside its 60 s window finds nothing left to change.
+ * The rows themselves are kept on purpose: the name stays unclaimable for
+ * the cooldown and then changes hands only as a rebind (G3a), so G5 warns
+ * whoever opens an old `name@creds.id` link. Dropping the pubkey is what
+ * removes the name↔key link; the old key can never reclaim it. `updated_at`
+ * starts the cooldown. A replay of the same NIP-98 event inside its 60 s
+ * window finds nothing left to change.
  */
 export async function eraseHandlesForPubkey(
   db: D1Database,
@@ -540,6 +568,7 @@ async function executeRegisterBatch(
   input: RegisterHandleInput,
   snapshot: {
     target: HandleRow | null;
+    claimsErased: boolean;
     active: HandleRow | null;
     previousRegistration: PreviousRegistration | null;
     countsAsRename: boolean;
@@ -551,11 +580,16 @@ async function executeRegisterBatch(
     snapshot.active,
     input.pubkey,
   );
-  const expectedTarget = buildExpectedTargetCondition(
-    snapshot.target,
-    input.name,
-    input.pubkey,
-  );
+  const expectedTarget = snapshot.claimsErased
+    ? {
+        sql: `EXISTS (
+          SELECT 1
+          FROM nip05_handles
+          WHERE name = ? AND pubkey = ? AND status = 'released' AND updated_at <= ?
+        )`,
+        bindings: [input.name, ERASED_PUBKEY, erasedClaimCutoff(input.nowSeconds)],
+      }
+    : buildExpectedTargetCondition(snapshot.target, input.name, input.pubkey);
   const expectedHistory = buildExpectedHistoryCondition(
     snapshot.previousRegistration,
     input.pubkey,
@@ -633,7 +667,45 @@ async function executeRegisterBatch(
     );
   }
 
-  if (snapshot.target === null) {
+  if (snapshot.claimsErased) {
+    // G3a claim: the new holder takes over the erased row. It is a fresh
+    // registration (`created_at` restarts) but the SAME row, so the rebind
+    // counter keeps climbing and G5 tells holders of an old link.
+    statements.push(
+      db
+        .prepare(
+          `UPDATE nip05_handles
+           SET pubkey = ?,
+               relays = ?,
+               status = 'active',
+               created_at = ?,
+               updated_at = ?,
+               released_at = NULL,
+               redirect_to = NULL,
+               redirect_until = NULL,
+               rebind_generation = rebind_generation + 1,
+               rebound_at = ?
+           WHERE name = ?
+             AND pubkey = ?
+             AND status = 'released'
+             AND updated_at <= ?
+             AND EXISTS (
+               SELECT 1 FROM nip05_audit WHERE event_id = ?
+             )`,
+        )
+        .bind(
+          input.pubkey,
+          relays,
+          input.nowSeconds,
+          input.nowSeconds,
+          input.nowSeconds,
+          input.name,
+          ERASED_PUBKEY,
+          erasedClaimCutoff(input.nowSeconds),
+          input.eventId,
+        ),
+    );
+  } else if (snapshot.target === null) {
     statements.push(
       db
         .prepare(

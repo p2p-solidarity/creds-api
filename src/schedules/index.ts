@@ -2,8 +2,8 @@ import { purgeExpiredNip05Data } from "../lib/nip05/repository";
 import { purgeExpiredNonces } from "../lib/signedRequest";
 import type { CloudflareBindings } from "../types/bindings";
 
-// Handle rows are permanent tombstones (design G3) and are never purged —
-// deleting one would quietly free the name for a stranger to take.
+// Handle rows are never purged (design G3/G3a) — deleting one would free the
+// name with no rebind marker for holders of an old link.
 export async function runNip05Cleanup(env: CloudflareBindings) {
   const removed = await purgeExpiredNip05Data(
     env.INBOX_DB,
