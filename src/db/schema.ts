@@ -61,6 +61,9 @@ export const nip05Handles = sqliteTable(
     uniqueIndex("nip05_handles_active_pubkey_unique")
       .on(table.pubkey)
       .where(sql`${table.status} = 'active'`),
+    // Pubkey lookups that don't filter on status = 'active' can't use the
+    // partial index above; without this they scan every row.
+    index("nip05_handles_pubkey_idx").on(table.pubkey, table.updatedAt),
     // Released rows are permanent tombstones (G3), never purged — this index
     // serves reclaim lookups by the original holder, not cleanup.
     index("nip05_handles_status_idx").on(table.status, table.releasedAt),
